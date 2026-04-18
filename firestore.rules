@@ -1,0 +1,92 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default-deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Reuseable helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      // Check for admin role in the users collection
+      return isSignedIn() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // --- Products ---
+    match /products/{productId} {
+      function isValidProduct(data) {
+        return data.name is string && data.name.size() > 0 && data.name.size() < 255 &&
+               data.price is number && data.price >= 0 &&
+               data.category is string &&
+               (data.images is list || !('images' in data)) &&
+               (data.specs is string || !('specs' in data));
+      }
+
+      allow read: if true; // Publicly readable
+      allow write: if isAdmin(); // Only admins can modify products
+    }
+
+    // --- Users ---
+    match /users/{userId} {
+      function isValidUser(data) {
+        return data.email is string && data.email.size() > 0 &&
+               data.role in ['customer', 'admin'];
+      }
+
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isSignedIn() && isValidUser(request.resource.data) && isOwner(userId);
+      allow update: if isOwner(userId) && (
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role']) || isAdmin()
+      );
+    }
+
+    // --- Orders ---
+    match /orders/{orderId} {
+      function isValidOrder(data) {
+        return data.userId is string && data.userId == request.auth.uid &&
+               data.totalAmount is number && data.totalAmount >= 0 &&
+               data.status in ['Pending', 'Confirmed', 'Shipped', 'Delivered'];
+      }
+
+      // Explicit list check to prevent query scraping
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow get: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      
+      allow create: if isVerified() && isValidOrder(request.resource.data);
+      
+      allow update: if isSignedIn() && (
+        // Customers can only update PoP or cancel (if allowed by logic)
+        (isOwner(resource.data.userId) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['popUrl'])) ||
+        isAdmin()
+      );
+    }
+
+    // --- Wishlist ---
+    match /wishlist/{wishlistId} {
+      function isValidWishlistItem(data) {
+        return data.userId is string && data.userId == request.auth.uid &&
+               data.productId is string && data.productId.size() > 0;
+      }
+
+      allow read: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isVerified() && isValidWishlistItem(request.resource.data);
+      allow delete: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+    }
+  }
+}
